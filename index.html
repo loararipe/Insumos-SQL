@@ -11,7 +11,7 @@
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; margin: 0; }
+    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; margin: 0; overflow-x: hidden; }
     #loading-screen {
       position: fixed; inset: 0; background: white; z-index: 9999;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -27,7 +27,6 @@
   </style>
 
   <script>
-    // Configurações do Supabase com as credenciais reais do usuário
     window.process = { 
       env: { 
         API_KEY: "", 
@@ -54,139 +53,58 @@
 <body>
   <div id="loading-screen">
     <div class="spinner"></div>
-    <div class="loading-text">Iniciando ValorCafé...</div>
-    <div id="status-log" style="margin-top: 20px; font-size: 10px; color: #94a3b8; font-family: monospace; max-width: 80%; text-align: center;"></div>
+    <div class="loading-text">ValorCafé Cloud</div>
+    <div id="status-log" style="margin-top: 20px; font-size: 10px; color: #94a3b8; font-family: monospace;">Aguardando...</div>
   </div>
-  
   <div id="root"></div>
 
   <script type="text/babel">
-    // Lista de arquivos na ordem de dependência
-    const FILES = [
-      'types.ts',
-      'utils/export.ts',
-      'services/supabaseClient.ts',
-      'services/geminiService.ts',
-      'components/ProductInput.tsx',
-      'components/Logo.tsx',
-      'components/RotaView.tsx',
-      'App.tsx',
-      'index.tsx'
-    ];
-
+    const FILES = ['App.tsx', 'index.tsx'];
     const blobUrls = {};
 
-    function log(msg) {
-      console.log(msg);
-      const logEl = document.getElementById('status-log');
-      if (logEl) logEl.innerText = msg;
-    }
-
-    function resolveImportPath(currentFile, importPath) {
-      if (!importPath.startsWith('.')) return importPath;
-      
-      let currentDir = currentFile.split('/').slice(0, -1);
-      let importParts = importPath.split('/');
-      
-      for (let part of importParts) {
-        if (part === '.') continue;
-        if (part === '..') currentDir.pop();
-        else currentDir.push(part);
-      }
-      
-      let resolved = currentDir.join('/');
-      
-      if (!resolved.includes('.')) {
-        if (resolved.includes('components/') || resolved.endsWith('App') || resolved.endsWith('index')) {
-          resolved += '.tsx';
-        } else {
-          resolved += '.ts';
-        }
-      }
-      
-      return resolved.startsWith('./') ? resolved : './' + resolved;
-    }
-
     async function bootstrap() {
+      const logEl = document.getElementById('status-log');
       try {
         for (const file of FILES) {
-          const fetchPath = file.startsWith('./') ? file : './' + file;
-          log(`Lendo ${file}...`);
-          
-          const response = await fetch(fetchPath);
-          if (!response.ok) throw new Error(`Não foi possível ler o arquivo: ${file}`);
-          const code = await response.text();
-
-          log(`Processando ${file}...`);
+          if (logEl) logEl.innerText = `Carregando ${file}...`;
+          const res = await fetch('./' + file);
+          if (!res.ok) throw new Error(`Falha ao ler ${file}`);
+          const code = await res.text();
           
           const transformed = Babel.transform(code, {
-            presets: [
-              ['react', { runtime: 'automatic' }],
-              ['typescript', { isTSX: true, allExtensions: true }]
-            ],
+            presets: [['react', { runtime: 'automatic' }], ['typescript', { isTSX: true, allExtensions: true }]],
             filename: file,
-            sourceMaps: false,
             plugins: [
               ({ types: t }) => ({
                 visitor: {
-                  ImportDeclaration(pathNode) {
-                    const source = pathNode.node.source.value;
-                    if (source.startsWith('.')) {
-                      const resolved = resolveImportPath(file, source);
-                      const key = resolved.startsWith('./') ? resolved : './' + resolved;
-                      if (blobUrls[key]) {
-                        pathNode.node.source.value = blobUrls[key];
-                      }
-                    }
-                  },
-                  ExportNamedDeclaration(pathNode) {
-                    if (pathNode.node.source && pathNode.node.source.value.startsWith('.')) {
-                      const resolved = resolveImportPath(file, pathNode.node.source.value);
-                      const key = resolved.startsWith('./') ? resolved : './' + resolved;
-                      if (blobUrls[key]) {
-                        pathNode.node.source.value = blobUrls[key];
-                      }
+                  ImportDeclaration(path) {
+                    if (path.node.source.value.startsWith('.')) {
+                      const parts = path.node.source.value.split('/');
+                      const name = parts[parts.length - 1].replace('.tsx', '').replace('.ts', '') + '.tsx';
+                      if (blobUrls['./' + name]) path.node.source.value = blobUrls['./' + name];
                     }
                   }
                 }
               })
             ]
           }).code;
-
           const blob = new Blob([transformed], { type: 'application/javascript' });
           blobUrls['./' + file] = URL.createObjectURL(blob);
         }
 
-        log("Iniciando interface...");
-        const entryPoint = document.createElement('script');
-        entryPoint.type = 'module';
-        entryPoint.src = blobUrls['./index.tsx'];
-        document.body.appendChild(entryPoint);
+        const entry = document.createElement('script');
+        entry.type = 'module';
+        entry.src = blobUrls['./index.tsx'];
+        document.body.appendChild(entry);
 
         setTimeout(() => {
           const loader = document.getElementById('loading-screen');
-          if (loader) {
-            loader.style.opacity = '0';
-            setTimeout(() => loader.style.display = 'none', 500);
-          }
-        }, 800);
-
+          if (loader) loader.style.display = 'none';
+        }, 1000);
       } catch (err) {
-        console.error("Erro fatal:", err);
-        const screen = document.getElementById('loading-screen');
-        if (screen) {
-          screen.innerHTML = `
-            <div style="text-align: center; color: #ef4444; padding: 30px; background: #fff1f2; border-radius: 20px; border: 1px solid #fecaca; max-width: 90%;">
-              <i class="fas fa-bug" style="font-size: 40px; margin-bottom: 20px;"></i>
-              <h2 style="font-weight: 800; margin-bottom: 10px;">Falha Crítica</h2>
-              <p style="font-size: 13px; font-family: monospace; background: white; padding: 10px; border-radius: 8px;">${err.message}</p>
-              <button onclick="location.reload()" style="margin-top: 20px; background: #3D231A; color: white; padding: 12px 24px; border-radius: 10px; font-weight: bold;">Tentar Recarregar</button>
-            </div>
-          `;
-        }
+        if (logEl) logEl.innerHTML = `<span style="color:red">Erro: ${err.message}</span>`;
       }
     }
-
     bootstrap();
   </script>
 </body>
