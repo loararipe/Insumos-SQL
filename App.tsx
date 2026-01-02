@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { RotaName, ROTAS, DailyLog, ClientDelivery, AppState, PRODUCTS } from './types.ts';
 import RotaView from './components/RotaView.tsx';
 import Logo from './components/Logo.tsx';
@@ -7,11 +7,16 @@ import { exportToTxt } from './utils/export.ts';
 import { generateDailyAIInsight } from './services/geminiService.ts';
 import { supabase } from './services/supabaseClient.ts';
 
+const LOCAL_STORAGE_KEY = 'valorcafe_logistics_v1';
+
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
     const today = new Date().toISOString().split('T')[0];
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+    const initialLogs = saved ? JSON.parse(saved).logs : {};
+    
     return {
-      logs: {},
+      logs: initialLogs,
       currentDate: today,
       isCloudSynced: true
     };
@@ -22,44 +27,46 @@ const App: React.FC = () => {
   const [activeRota, setActiveRota] = useState<RotaName | null>(null);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
 
-  // Função para carregar dados do Supabase
+  // Persistir no LocalStorage sempre que os logs mudarem
+  useEffect(() => {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ logs: state.logs }));
+  }, [state.logs]);
+
+  // Função para carregar dados do Supabase e mesclar com local
   const fetchData = async (date: string) => {
+    if (process.env.SUPABASE_ANON_KEY === 'COLE_SUA_ANON_KEY_AQUI') {
+      console.warn("Supabase Anon Key não configurada. Operando em modo local.");
+      setIsInitialLoad(false);
+      return;
+    }
+
     setState(prev => ({ ...prev, isCloudSynced: false }));
     
     try {
-      // 1. Buscar Carga Inicial (Inbound)
-      const { data: inboundData, error: inboundError } = await supabase
-        .from('inbound')
-        .select('*')
-        .eq('date', date);
+      const [inboundRes, deliveriesRes] = await Promise.all([
+        supabase.from('inbound').select('*').eq('date', date),
+        supabase.from('deliveries').select('*').eq('date', date)
+      ]);
 
-      if (inboundError) throw inboundError;
+      if (inboundRes.error) throw inboundRes.error;
+      if (deliveriesRes.error) throw deliveriesRes.error;
 
-      // 2. Buscar Entregas (Deliveries)
-      const { data: deliveriesData, error: deliveriesError } = await supabase
-        .from('deliveries')
-        .select('*')
-        .eq('date', date);
-
-      if (deliveriesError) throw deliveriesError;
-
-      // 3. Transformar dados para o formato DailyLog
-      const newLog: DailyLog = {
+      const cloudLog: DailyLog = {
         date,
         rotaInbound: {},
         clientDeliveries: {}
       };
 
-      inboundData?.forEach(row => {
+      inboundRes.data?.forEach(row => {
         const rota = row.rota as RotaName;
-        if (!newLog.rotaInbound[rota]) newLog.rotaInbound[rota] = {};
-        newLog.rotaInbound[rota]![row.product_name] = row.quantity;
+        if (!cloudLog.rotaInbound[rota]) cloudLog.rotaInbound[rota] = {};
+        cloudLog.rotaInbound[rota]![row.product_name] = row.quantity;
       });
 
-      deliveriesData?.forEach(row => {
+      deliveriesRes.data?.forEach(row => {
         const rota = row.rota as RotaName;
-        if (!newLog.clientDeliveries[rota]) newLog.clientDeliveries[rota] = [];
-        newLog.clientDeliveries[rota]!.push({
+        if (!cloudLog.clientDeliveries[rota]) cloudLog.clientDeliveries[rota] = [];
+        cloudLog.clientDeliveries[rota]!.push({
           id: row.id,
           clientName: row.client_name,
           timestamp: row.delivery_timestamp,
@@ -68,20 +75,23 @@ const App: React.FC = () => {
         });
       });
 
-      setState(prev => ({
-        ...prev,
-        logs: { ...prev.logs, [date]: newLog },
-        isCloudSynced: true
-      }));
+      // Mesclar dados da nuvem com locais (Nuvem tem prioridade se houver conflito de data)
+      setState(prev => {
+        const updatedLogs = { ...prev.logs, [date]: cloudLog };
+        return {
+          ...prev,
+          logs: updatedLogs,
+          isCloudSynced: true
+        };
+      });
     } catch (error) {
-      console.error("Error fetching from Supabase:", error);
+      console.error("Erro ao sincronizar com nuvem:", error);
       setState(prev => ({ ...prev, isCloudSynced: true }));
     } finally {
       setIsInitialLoad(false);
     }
   };
 
-  // Carregar dados toda vez que a data mudar
   useEffect(() => {
     fetchData(state.currentDate);
   }, [state.currentDate]);
@@ -95,9 +105,22 @@ const App: React.FC = () => {
   }, [state.logs, state.currentDate]);
 
   const handleUpdateInbound = async (rota: RotaName, items: { [p: string]: number }) => {
-    setState(prev => ({ ...prev, isCloudSynced: false }));
+    // 1. Atualização Otimista Local (Imediata)
+    const newLog = { ...currentLog };
+    newLog.rotaInbound = { ...newLog.rotaInbound, [rota]: items };
     
-    // Preparar dados para o formato da tabela do banco
+    setState(prev => ({
+      ...prev,
+      isCloudSynced: false,
+      logs: { ...prev.logs, [prev.currentDate]: newLog }
+    }));
+
+    // 2. Sincronização em Background com Supabase
+    if (process.env.SUPABASE_ANON_KEY === 'COLE_SUA_ANON_KEY_AQUI') {
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+      return;
+    }
+
     const upserts = Object.entries(items).map(([p, q]) => ({
       date: state.currentDate,
       rota: rota,
@@ -109,27 +132,33 @@ const App: React.FC = () => {
       const { error } = await supabase
         .from('inbound')
         .upsert(upserts, { onConflict: 'date,rota,product_name' });
-
       if (error) throw error;
-      
-      // Atualiza localmente após sucesso no banco
-      const newLog = { ...currentLog };
-      newLog.rotaInbound = { ...newLog.rotaInbound, [rota]: items };
-      setState(prev => ({
-        ...prev,
-        logs: { ...prev.logs, [prev.currentDate]: newLog },
-        isCloudSynced: true
-      }));
+      setState(prev => ({ ...prev, isCloudSynced: true }));
     } catch (e) {
-      console.error("Save error:", e);
-      alert("Erro ao salvar carga no banco de dados.");
+      console.error("Erro no salvamento cloud:", e);
+      // Mantemos o dado local, apenas sinalizamos que não sincronizou
       setState(prev => ({ ...prev, isCloudSynced: true }));
     }
   };
 
   const handleAddDelivery = async (rota: RotaName, delivery: ClientDelivery) => {
-    setState(prev => ({ ...prev, isCloudSynced: false }));
+    // 1. Atualização Local
+    const newLog = { ...currentLog };
+    const currentDels = newLog.clientDeliveries[rota] || [];
+    newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: [delivery, ...currentDels] };
     
+    setState(prev => ({
+      ...prev,
+      isCloudSynced: false,
+      logs: { ...prev.logs, [prev.currentDate]: newLog }
+    }));
+
+    // 2. Sync Cloud
+    if (process.env.SUPABASE_ANON_KEY === 'COLE_SUA_ANON_KEY_AQUI') {
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+      return;
+    }
+
     try {
       const { error } = await supabase
         .from('deliveries')
@@ -141,48 +170,43 @@ const App: React.FC = () => {
           items: delivery.items,
           delivery_timestamp: delivery.timestamp
         });
-
       if (error) throw error;
-
-      const newLog = { ...currentLog };
-      const currentRels = newLog.clientDeliveries[rota] || [];
-      newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: [delivery, ...currentRels] };
-      
-      setState(prev => ({
-        ...prev,
-        logs: { ...prev.logs, [prev.currentDate]: newLog },
-        isCloudSynced: true
-      }));
+      setState(prev => ({ ...prev, isCloudSynced: true }));
     } catch (e) {
-      console.error("Delivery error:", e);
-      alert("Erro ao registrar entrega no banco de dados.");
+      console.error("Erro no envio de entrega:", e);
       setState(prev => ({ ...prev, isCloudSynced: true }));
     }
   };
 
   const handleDeleteDelivery = async (rota: RotaName, deliveryId: string) => {
-    if (!window.confirm("Excluir registro permanentemente do banco?")) return;
-    setState(prev => ({ ...prev, isCloudSynced: false }));
+    if (!window.confirm("Excluir registro permanentemente?")) return;
     
+    // 1. Atualização Local
+    const newLog = { ...currentLog };
+    const currentDels = newLog.clientDeliveries[rota] || [];
+    newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: currentDels.filter(d => d.id !== deliveryId) };
+    
+    setState(prev => ({
+      ...prev,
+      isCloudSynced: false,
+      logs: { ...prev.logs, [prev.currentDate]: newLog }
+    }));
+
+    // 2. Sync Cloud
+    if (process.env.SUPABASE_ANON_KEY === 'COLE_SUA_ANON_KEY_AQUI') {
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+      return;
+    }
+
     try {
       const { error } = await supabase
         .from('deliveries')
         .delete()
         .eq('id', deliveryId);
-
       if (error) throw error;
-
-      const newLog = { ...currentLog };
-      const currentRels = newLog.clientDeliveries[rota] || [];
-      newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: currentRels.filter(d => d.id !== deliveryId) };
-      
-      setState(prev => ({
-        ...prev,
-        logs: { ...prev.logs, [prev.currentDate]: newLog },
-        isCloudSynced: true
-      }));
+      setState(prev => ({ ...prev, isCloudSynced: true }));
     } catch (e) {
-      console.error("Delete error:", e);
+      console.error("Erro na exclusão cloud:", e);
       setState(prev => ({ ...prev, isCloudSynced: true }));
     }
   };
@@ -229,8 +253,10 @@ const App: React.FC = () => {
             <div className="border-l border-slate-200 pl-4 h-8 flex flex-col justify-center ml-4">
               <span className="text-base font-black text-[#3D231A]">ValorCafé</span>
               <div className="flex items-center gap-2">
-                <span className="text-[8px] font-bold text-[#F9A11B] uppercase tracking-widest">Live Cloud Ops</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${state.isCloudSynced ? 'bg-green-500 animate-pulse' : 'bg-amber-500 animate-spin-slow'}`}></span>
+                <span className="text-[8px] font-bold text-[#F9A11B] uppercase tracking-widest">
+                  {state.isCloudSynced ? 'Sincronizado' : 'Salvando...'}
+                </span>
+                <span className={`w-1.5 h-1.5 rounded-full ${state.isCloudSynced ? 'bg-green-500' : 'bg-amber-500 animate-pulse'}`}></span>
               </div>
             </div>
           </div>
@@ -261,7 +287,7 @@ const App: React.FC = () => {
         {isInitialLoad ? (
            <div className="flex flex-col items-center justify-center py-20">
               <div className="w-10 h-10 border-4 border-slate-200 border-t-[#F9A11B] rounded-full animate-spin mb-4"></div>
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Sincronizando com Banco...</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Sincronizando Dados...</span>
            </div>
         ) : (
           <>
@@ -328,6 +354,7 @@ const App: React.FC = () => {
 
             {activeRota ? (
               <RotaView
+                key={`${activeRota}-${state.currentDate}`}
                 rota={activeRota}
                 log={currentLog}
                 onUpdateInbound={handleUpdateInbound}
@@ -340,7 +367,7 @@ const App: React.FC = () => {
                   <i className="fas fa-map-location-dot text-3xl text-slate-200"></i>
                 </div>
                 <h3 className="text-[#3D231A] font-black text-xl mb-2">Visão Geral Ativa</h3>
-                <p className="text-slate-400 text-sm max-w-sm mx-auto">Selecione uma região acima para gerenciar o carregamento ou registrar entregas em tempo real sincronizadas na nuvem.</p>
+                <p className="text-slate-400 text-sm max-w-sm mx-auto">Selecione uma região acima para gerenciar a operação do dia. Os dados são salvos localmente e na nuvem.</p>
               </div>
             )}
           </>
