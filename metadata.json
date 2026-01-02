@@ -1,5 +1,5 @@
 {
-  "name": "Copy of ValorCafé Logistics Manager",
+  "name": "ValorCafé - logistica de entrega de insumo",
   "description": "A comprehensive logistics and delivery tracking system for Valorcafe, managing daily stock distribution across Rio de Janeiro's regions and client delivery records.",
   "requestFramePermissions": [
     "camera"
