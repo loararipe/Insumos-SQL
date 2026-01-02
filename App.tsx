@@ -36,27 +36,27 @@ const LOCAL_STORAGE_KEY = 'valorcafe_persistent_v5';
 // --- COMPONENTES DE INTERFACE ---
 
 const Logo = () => (
-  <div className="h-10">
+  <div className="h-12">
     <svg viewBox="0 0 400 400" className="h-full w-auto">
       <path d="M200 180C200 140 160 100 185 50C195 25 220 5 200 0C240 40 215 85 220 120C225 155 200 170 200 180Z" fill="#F9A11B" />
-      <circle cx="200" cy="255" r="78" stroke="#3D231A" strokeWidth="6" fill="none" />
-      <circle cx="200" cy="255" r="56" fill="#3D231A" />
-      <path d="M125 255C125 315 160 355 200 355C240 355 275 315 275 255" stroke="#3D231A" strokeWidth="3.5" fill="none" />
+      <circle cx="200" cy="255" r="78" stroke="#0f172a" strokeWidth="6" fill="none" />
+      <circle cx="200" cy="255" r="56" fill="#0f172a" />
+      <path d="M125 255C125 315 160 355 200 355C240 355 275 315 275 255" stroke="#0f172a" strokeWidth="3.5" fill="none" />
     </svg>
   </div>
 );
 
 const ProductGrid = ({ values, onChange }: { values: any, onChange: (p: ProductName, v: number) => void }) => (
-  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
     {PRODUCTS.map(p => (
-      <div key={p} className="bg-slate-50 p-3 rounded-xl border border-slate-100 focus-within:border-amber-400 transition-colors">
-        <label className="text-[9px] font-black text-slate-400 uppercase block mb-1 truncate tracking-tighter">{p}</label>
+      <div key={p} className="bg-white p-4 rounded-2xl border border-slate-200 focus-within:border-amber-400 focus-within:ring-4 focus-within:ring-amber-50 transition-all shadow-sm">
+        <label className="text-[11px] font-black text-slate-600 uppercase block mb-2 truncate tracking-tight">{p}</label>
         <input 
           type="number" 
           inputMode="numeric"
           value={values[p] || ''} 
           onChange={e => onChange(p, Math.max(0, parseInt(e.target.value) || 0))}
-          className="bg-transparent font-mono font-bold text-[#3D231A] outline-none w-full text-sm placeholder-slate-300"
+          className="bg-transparent font-mono font-bold text-slate-900 outline-none w-full text-lg placeholder-slate-200"
           placeholder="0"
         />
       </div>
@@ -139,12 +139,12 @@ export default function App() {
   };
 
   const getAiInsight = async () => {
-    setAiInsight('Analisando fluxos...');
+    setAiInsight('Analisando fluxos logísticos...');
     try {
       const genAI = new GoogleGenAI({ apiKey: (window as any).process.env.API_KEY });
       const response = await genAI.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Analise o balanço de estoque da ValorCafé para ${date}. Seja breve e técnico.`
+        contents: `Analise brevemente o balanço de estoque da ValorCafé para ${date}. Considere: ${JSON.stringify(globalProductMetrics)}`
       });
       setAiInsight(response.text || '');
     } catch { setAiInsight('Insight indisponível.'); }
@@ -155,10 +155,9 @@ export default function App() {
     txt += `Gerado em: ${new Date().toLocaleString('pt-BR')}\n`;
     txt += `======================================================================\n\n`;
 
-    // 1. CONSOLIDADO GERAL DA EMPRESA
-    txt += `1. CONSOLIDADO GERAL (SOMA DE TODAS AS ROTAS)\n`;
+    txt += `1. CONSOLIDADO GERAL\n`;
     txt += `----------------------------------------------------------------------\n`;
-    txt += `PRODUTO`.padEnd(20) + ` | ` + `SAÍDA CD`.padStart(10) + ` | ` + `ENTREGUE`.padStart(10) + ` | ` + `SALDO RETORNO`.padStart(15) + `\n`;
+    txt += `PRODUTO`.padEnd(20) + ` | ` + `SAÍDA CD`.padStart(10) + ` | ` + `ENTREGUE`.padStart(10) + ` | ` + `SALDO`.padStart(15) + `\n`;
     txt += `-`.repeat(70) + `\n`;
     
     PRODUCTS.forEach(p => {
@@ -169,29 +168,19 @@ export default function App() {
     });
     txt += `\n\n`;
 
-    // 2. DETALHAMENTO POR ROTA
-    txt += `2. DETALHAMENTO POR ROTA\n`;
-    txt += `======================================================================\n\n`;
-
     ROTAS.forEach(r => {
       const inbound = currentLog.rotaInbound[r] || {};
       const deliveries = currentLog.clientDeliveries[r] || [];
-      
-      const hasActivity = Object.values(inbound).some(v => v > 0) || deliveries.length > 0;
-      if (!hasActivity) return;
+      if (!Object.values(inbound).some(v => v > 0) && deliveries.length === 0) return;
 
       txt += `>>> REGIONAL: ${r.toUpperCase()}\n`;
       txt += `----------------------------------------------------------------------\n`;
-      
-      // Totais da Rota
       const rotaDelivered: { [p: string]: number } = {};
       deliveries.forEach(d => {
-        Object.entries(d.items).forEach(([p, q]) => {
-          rotaDelivered[p] = (rotaDelivered[p] || 0) + (q as number);
-        });
+        Object.entries(d.items).forEach(([p, q]) => { rotaDelivered[p] = (rotaDelivered[p] || 0) + (q as number); });
       });
 
-      txt += `BALANÇO DA ROTA:\n`;
+      txt += `BALANÇO:\n`;
       PRODUCTS.forEach(p => {
         const inQ = inbound[p] || 0;
         const outQ = rotaDelivered[p] || 0;
@@ -199,98 +188,92 @@ export default function App() {
           txt += `  - ${p.padEnd(15)}: Carga(${String(inQ).padStart(3)}) | Entregue(${String(outQ).padStart(3)}) | Saldo(${String(inQ - outQ).padStart(3)})\n`;
         }
       });
-
-      txt += `\nLISTA DE ENTREGAS POR CLIENTE:\n`;
-      if (deliveries.length === 0) {
-        txt += `  (Nenhuma entrega registrada)\n`;
-      } else {
-        deliveries.forEach(d => {
-          txt += `  [${new Date(d.timestamp).toLocaleTimeString('pt-BR')}] - ${d.clientName}\n`;
-          Object.entries(d.items).forEach(([p, q]) => {
-            if ((q as number) > 0) txt += `    . ${p}: ${q}\n`;
-          });
-        });
-      }
+      txt += `\nLISTA DE ENTREGAS:\n`;
+      deliveries.forEach(d => {
+        txt += `  [${new Date(d.timestamp).toLocaleTimeString('pt-BR')}] - ${d.clientName}\n`;
+        Object.entries(d.items).forEach(([p, q]) => { if ((q as number) > 0) txt += `    . ${p}: ${q}\n`; });
+      });
       txt += `\n\n`;
     });
-
-    txt += `======================================================================\n`;
-    txt += `FIM DO RELATÓRIO - VALORCAFÉ CLOUD\n`;
 
     const blob = new Blob([txt], { type: 'text/plain' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `Relatorio_ValorCafe_${date}.txt`;
+    link.download = `ValorCafe_Completo_${date}.txt`;
     link.click();
   };
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-[#3D231A]">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-50 p-4 shadow-sm">
-        <div className="max-w-5xl mx-auto flex justify-between items-center gap-4">
-          <div className="flex items-center gap-3">
+    <div className="min-h-screen bg-slate-50 text-slate-900 selection:bg-amber-100">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-50 p-5 shadow-sm">
+        <div className="max-w-5xl mx-auto flex justify-between items-center gap-6">
+          <div className="flex items-center gap-4">
             <Logo />
             <div className="hidden sm:block">
-              <h1 className="font-black text-sm tracking-tighter uppercase leading-none">ValorCafé Cloud</h1>
-              <span className={`text-[8px] font-black uppercase tracking-[0.2em] ${isSyncing ? 'text-amber-500 animate-pulse' : 'text-green-500'}`}>
-                {isSyncing ? 'Sincronizando' : 'Operação Ativa'}
+              <h1 className="font-black text-lg tracking-tight uppercase leading-none text-slate-900">ValorCafé <span className="text-amber-500">Cloud</span></h1>
+              <span className={`text-[10px] font-black uppercase tracking-widest ${isSyncing ? 'text-amber-500 animate-pulse' : 'text-emerald-600'}`}>
+                {isSyncing ? 'Sincronizando' : 'Sistema Ativo'}
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-             <button onClick={exportReport} className="bg-[#3D231A] text-white hover:bg-black px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg" title="Exportar Relatório Detalhado">
-               <i className="fas fa-file-invoice"></i>
-               <span className="hidden sm:inline">Exportar Relatório</span>
+          <div className="flex items-center gap-3">
+             <button onClick={exportReport} className="bg-slate-900 text-white hover:bg-black px-6 py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest flex items-center gap-3 transition-all shadow-xl shadow-slate-200 active:scale-95">
+               <i className="fas fa-file-invoice text-amber-500 text-sm"></i>
+               <span className="hidden md:inline">Relatório Completo</span>
              </button>
              <input 
               type="date" 
               value={date} 
               onChange={e => setDate(e.target.value)}
-              className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-amber-200"
+              className="bg-slate-100 border-none rounded-2xl px-4 py-3 text-sm font-black outline-none focus:ring-4 focus:ring-amber-100 transition-all text-slate-900 cursor-pointer"
             />
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto p-4 md:p-8 space-y-6 animate-fade-in">
+      <main className="max-w-5xl mx-auto p-5 md:p-10 space-y-10 animate-fade-in">
         
-        {/* DASHBOARD DE BALANÇO (Somente Desktop) */}
-        <section className="hidden md:block space-y-3">
-          <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Consolidado Geral</h3>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* DASHBOARD GERAL (Desktop) */}
+        <section className="hidden md:block space-y-5">
+          <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Consolidado Geral do Dia</h3>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             {Object.entries(globalProductMetrics).filter(([_, m]) => m.inbound > 0).slice(0, 4).map(([p, m]) => (
-              <div key={p} className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-                <span className="text-[9px] font-black text-slate-400 uppercase block mb-1">{p}</span>
+              <div key={p} className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
+                <span className="text-[10px] font-black text-slate-500 uppercase block mb-2">{p}</span>
                 <div className="flex justify-between items-end">
-                  <span className="text-2xl font-black">{m.inbound}</span>
+                  <span className="text-3xl font-black text-slate-900">{m.inbound}</span>
                   <div className="text-right">
-                    <span className="text-[8px] font-bold text-amber-500 block">Entregue: {m.delivered}</span>
-                    <span className="text-[8px] font-bold text-slate-300 block">Saldo: {m.inbound - m.delivered}</span>
+                    <span className="text-[10px] font-black text-amber-600 block">ENT: {m.delivered}</span>
+                    <span className="text-[10px] font-black text-slate-400 block">SAL: {m.inbound - m.delivered}</span>
                   </div>
                 </div>
               </div>
             ))}
-            <div className="bg-[#3D231A] p-5 rounded-3xl shadow-xl text-white relative overflow-hidden group">
-              <p className="text-[9px] font-medium leading-relaxed italic opacity-80 z-10 pr-6">
-                {aiInsight || "Análise estratégica via IA disponível."}
+            <div className="bg-slate-900 p-6 rounded-[2rem] shadow-2xl text-white relative overflow-hidden group min-h-[120px] flex flex-col justify-between">
+              <p className="text-xs font-bold leading-relaxed italic text-slate-300 z-10 pr-6">
+                {aiInsight || "IA ValorCafé pronta para análise."}
               </p>
-              <button onClick={getAiInsight} className="absolute right-4 bottom-4 text-amber-500 hover:scale-125 transition-transform z-10">
+              <button onClick={getAiInsight} className="self-end bg-amber-500 text-slate-950 w-10 h-10 rounded-2xl flex items-center justify-center hover:scale-110 transition-transform shadow-lg z-10">
                 <i className="fas fa-bolt"></i>
               </button>
+              <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-amber-500/10 rounded-full blur-3xl"></div>
             </div>
           </div>
         </section>
 
-        {/* SELETOR DE REGIONAL */}
-        <div className="space-y-3">
-          <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Regiões</h3>
-          <div className="flex overflow-x-auto gap-2 pb-2 no-scrollbar">
+        {/* REGIONAIS */}
+        <div className="space-y-4">
+          <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Regiões de Atendimento</h3>
+          <div className="flex overflow-x-auto gap-3 pb-4 no-scrollbar">
             {ROTAS.map(r => (
               <button 
                 key={r} 
                 onClick={() => setActiveRota(r)}
-                className={`px-6 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all whitespace-nowrap ${
-                  activeRota === r ? 'bg-[#3D231A] text-white border-[#3D231A] shadow-lg -translate-y-1' : 'bg-white text-slate-400 border-slate-200 hover:border-amber-200 shadow-sm'
+                className={`px-8 py-5 rounded-[1.5rem] text-xs font-black uppercase tracking-widest border-2 transition-all whitespace-nowrap ${
+                  activeRota === r 
+                    ? 'bg-slate-900 text-white border-slate-900 shadow-2xl -translate-y-1' 
+                    : 'bg-white text-slate-500 border-slate-200 hover:border-amber-400 shadow-sm'
                 }`}
               >
                 {r}
@@ -300,65 +283,83 @@ export default function App() {
         </div>
 
         {activeRota ? (
-          <div className="space-y-6 animate-fade-in">
+          <div className="space-y-10 animate-fade-in pb-20">
             
-            {/* CARGA INICIAL (Escondida no Mobile por padrão) */}
-            <div className="hidden md:block bg-white p-8 rounded-[2rem] border border-slate-200 shadow-sm">
-              <h2 className="font-black text-lg mb-6 flex items-center gap-2">
-                <i className="fas fa-truck-moving text-amber-500"></i> Carga: {activeRota}
-              </h2>
+            {/* CARGA CD (Desktop) */}
+            <div className="hidden md:block bg-white p-10 rounded-[2.5rem] border border-slate-200 shadow-sm">
+              <div className="flex items-center gap-4 mb-8">
+                <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center text-xl">
+                  <i className="fas fa-truck-loading"></i>
+                </div>
+                <div>
+                  <h2 className="font-black text-2xl text-slate-900 uppercase tracking-tight">Carga Inicial: {activeRota}</h2>
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Controle de Saída do Centro de Distribuição</p>
+                </div>
+              </div>
               <ProductGrid 
                 values={currentLog.rotaInbound[activeRota] || {}} 
                 onChange={(p, v) => updateInbound(activeRota, { ...(currentLog.rotaInbound[activeRota] || {}), [p]: v })}
               />
             </div>
 
-            {/* SEÇÃO DE ENTREGA (Foco Mobile) */}
-            <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-md border-l-4 border-l-amber-500">
-              <h2 className="font-black text-lg mb-6 flex items-center gap-2">
-                <i className="fas fa-map-pin text-amber-500"></i> Entrega em {activeRota}
-              </h2>
-              <input 
-                placeholder="Identificação do Cliente"
-                value={clientName}
-                onChange={e => setClientName(e.target.value)}
-                className="w-full mb-6 p-4 rounded-2xl bg-slate-50 border-2 border-transparent outline-none font-bold text-sm focus:bg-white focus:border-amber-200 transition-all"
-              />
+            {/* ENTREGA (Foco Mobile/Campo) */}
+            <div className="bg-white p-8 md:p-12 rounded-[2.5rem] border border-slate-200 shadow-xl border-l-8 border-l-amber-500">
+              <div className="flex items-center gap-4 mb-10">
+                <div className="w-12 h-12 bg-slate-900 text-white rounded-2xl flex items-center justify-center text-xl">
+                  <i className="fas fa-map-marker-alt"></i>
+                </div>
+                <div>
+                  <h2 className="font-black text-2xl text-slate-900 uppercase tracking-tight">Registrar Entrega</h2>
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Regional {activeRota}</p>
+                </div>
+              </div>
+              
+              <div className="space-y-4 mb-10">
+                <label className="text-xs font-black text-slate-500 uppercase tracking-widest block ml-1">Ponto de Venda (PDV)</label>
+                <input 
+                  placeholder="Ex: Starbucks Centro / Café do Zé"
+                  value={clientName}
+                  onChange={e => setClientName(e.target.value)}
+                  className="w-full p-6 rounded-2xl bg-slate-100 border-2 border-transparent outline-none font-bold text-lg text-slate-900 focus:bg-white focus:border-amber-400 transition-all placeholder-slate-300"
+                />
+              </div>
+
               <ProductGrid values={clientItems} onChange={(p, v) => setClientItems(prev => ({...prev, [p]: v}))} />
+              
               <button 
                 onClick={addDelivery}
-                className="w-full mt-8 py-5 bg-[#3D231A] text-white rounded-2xl font-black uppercase text-[10px] tracking-[0.3em] shadow-xl active:scale-[0.98] transition-all disabled:opacity-50"
+                className="w-full mt-10 py-6 bg-slate-900 text-white rounded-3xl font-black uppercase text-xs tracking-[0.3em] shadow-2xl shadow-slate-900/20 active:scale-95 transition-all disabled:opacity-50 disabled:grayscale"
                 disabled={!clientName}
               >
                 Confirmar Entrega Realizada
               </button>
             </div>
 
-            {/* TABELA DE CONFERÊNCIA (Desktop) */}
-            <div className="hidden md:block bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm">
-              <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6">Conferência {activeRota}</h3>
+            {/* CONFERÊNCIA (Desktop) */}
+            <div className="hidden md:block bg-white p-10 rounded-[2.5rem] border border-slate-100 shadow-sm">
+              <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-8">Tabela de Conferência Operacional</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
-                  <thead className="text-[10px] font-black text-slate-400 border-b border-slate-100">
+                  <thead className="text-[11px] font-black text-slate-400 border-b-2 border-slate-50">
                     <tr>
-                      <th className="pb-4">PRODUTO</th>
-                      <th className="pb-4 text-center">SAÍDA CD</th>
-                      <th className="pb-4 text-center text-amber-500">ENTREGUE</th>
-                      <th className="pb-4 text-right">SALDO</th>
+                      <th className="pb-6">PRODUTO</th>
+                      <th className="pb-6 text-center">SAÍDA CD</th>
+                      <th className="pb-6 text-center text-amber-600">ENTREGUE</th>
+                      <th className="pb-6 text-right">SALDO RETORNO</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-50">
+                  <tbody className="divide-y divide-slate-100">
                     {PRODUCTS.map(p => {
                       const inbound = currentLog.rotaInbound[activeRota]?.[p] || 0;
                       const delivered = (currentLog.clientDeliveries[activeRota] || []).reduce((acc, del) => acc + (del.items[p] || 0), 0);
                       const balance = inbound - delivered;
                       if (inbound === 0 && delivered === 0) return null;
                       return (
-                        <tr key={p} className="text-xs">
-                          <td className="py-4 font-bold text-slate-600 uppercase">{p}</td>
-                          <td className="py-4 text-center font-mono font-bold">{inbound}</td>
-                          <td className="py-4 text-center font-mono font-black text-amber-500">{delivered}</td>
-                          <td className={`py-4 text-right font-mono font-black ${balance < 0 ? 'text-red-500' : 'text-green-600'}`}>
+                        <tr key={p} className="text-sm">
+                          <td className="py-5 font-black text-slate-900 uppercase tracking-tight">{p}</td>
+                          <td className="py-5 text-center font-mono font-bold text-slate-600">{inbound}</td>
+                          <td className="py-5 text-center font-mono font-black text-amber-600">{delivered}</td>
+                          <td className={`py-5 text-right font-mono font-black ${balance < 0 ? 'text-red-500' : 'text-emerald-600'}`}>
                             {balance}
                           </td>
                         </tr>
@@ -369,38 +370,55 @@ export default function App() {
               </div>
             </div>
 
-            {/* HISTÓRICO */}
-            <div className="space-y-4">
-               <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Linha do Tempo</h3>
-               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* HISTÓRICO DE CAMPO */}
+            <div className="space-y-6">
+               <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Fluxo de Entregas Hoje</h3>
+               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 { (currentLog.clientDeliveries[activeRota] || []).map(d => (
-                  <div key={d.id} className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm flex justify-between items-start">
+                  <div key={d.id} className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm flex justify-between items-start hover:shadow-xl transition-all">
                     <div>
-                      <h4 className="font-black text-sm text-[#3D231A]">{d.clientName}</h4>
-                      <div className="flex flex-wrap gap-1.5 mt-2">
+                      <h4 className="font-black text-base text-slate-900">{d.clientName}</h4>
+                      <div className="flex flex-wrap gap-2 mt-3">
                         {Object.entries(d.items).map(([p, q]) => (q as number) > 0 && (
-                          <span key={p} className="text-[8px] font-black bg-amber-50 text-amber-600 px-2 py-1 rounded-lg uppercase border border-amber-100/50">
+                          <span key={p} className="text-[10px] font-black bg-amber-50 text-amber-700 px-3 py-1.5 rounded-xl uppercase border border-amber-100">
                             {q} {p}
                           </span>
                         ))}
                       </div>
                     </div>
-                    <span className="text-[8px] font-black text-slate-300">{new Date(d.timestamp).toLocaleTimeString('pt-BR')}</span>
+                    <div className="text-right flex flex-col items-end">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-2">{new Date(d.timestamp).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}</span>
+                      <div className="w-8 h-8 bg-emerald-50 rounded-2xl flex items-center justify-center">
+                        <i className="fas fa-check text-xs text-emerald-600"></i>
+                      </div>
+                    </div>
                   </div>
                 ))}
                </div>
+               {(currentLog.clientDeliveries[activeRota] || []).length === 0 && (
+                 <div className="text-center py-24 border-4 border-dashed border-slate-100 rounded-[3rem] text-slate-200 font-black uppercase text-xs tracking-[0.5em]">
+                   Nenhuma entrega registrada
+                 </div>
+               )}
             </div>
           </div>
         ) : (
-          <div className="py-32 text-center text-slate-300 font-black uppercase text-xs tracking-[0.4em]">
-            Selecione uma Região Operacional
+          <div className="py-40 text-center space-y-6">
+            <div className="w-28 h-28 bg-white rounded-full flex items-center justify-center mx-auto shadow-sm border border-slate-200 text-slate-100">
+              <i className="fas fa-route text-4xl"></i>
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-slate-400 font-black uppercase text-sm tracking-[0.5em]">Selecione uma Região</h3>
+              <p className="text-slate-300 text-xs font-bold max-w-xs mx-auto">Toque em uma das rotas acima para iniciar os registros logísticos do dia.</p>
+            </div>
           </div>
         )}
       </main>
 
-      <footer className="p-12 text-center opacity-40">
-        <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.8em]">
-          ValorCafé Logistics &copy; 2024
+      <footer className="p-16 text-center">
+        <div className="max-w-xs mx-auto h-px bg-slate-200 mb-8"></div>
+        <span className="text-[10px] font-black text-slate-300 uppercase tracking-[0.8em]">
+          ValorCafé Logistics Infrastructure &copy; 2024
         </span>
       </footer>
     </div>
