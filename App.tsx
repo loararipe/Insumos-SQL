@@ -5,21 +5,11 @@ import RotaView from './components/RotaView.tsx';
 import Logo from './components/Logo.tsx';
 import { exportToTxt } from './utils/export.ts';
 import { generateDailyAIInsight } from './services/geminiService.ts';
-
-const STORAGE_KEY = 'valorcafe_cloud_state_v2';
+import { supabase } from './services/supabaseClient.ts';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
     const today = new Date().toISOString().split('T')[0];
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return { ...parsed, currentDate: today, isCloudSynced: true };
-      } catch (e) {
-        console.error("Error parsing stored state", e);
-      }
-    }
     return {
       logs: {},
       currentDate: today,
@@ -30,51 +20,171 @@ const App: React.FC = () => {
   const [aiInsight, setAiInsight] = useState<string>('');
   const [isInsightLoading, setIsInsightLoading] = useState(false);
   const [activeRota, setActiveRota] = useState<RotaName | null>(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
+  // Função para carregar dados do Supabase
+  const fetchData = async (date: string) => {
+    setState(prev => ({ ...prev, isCloudSynced: false }));
+    
+    try {
+      // 1. Buscar Carga Inicial (Inbound)
+      const { data: inboundData, error: inboundError } = await supabase
+        .from('inbound')
+        .select('*')
+        .eq('date', date);
+
+      if (inboundError) throw inboundError;
+
+      // 2. Buscar Entregas (Deliveries)
+      const { data: deliveriesData, error: deliveriesError } = await supabase
+        .from('deliveries')
+        .select('*')
+        .eq('date', date);
+
+      if (deliveriesError) throw deliveriesError;
+
+      // 3. Transformar dados para o formato DailyLog
+      const newLog: DailyLog = {
+        date,
+        rotaInbound: {},
+        clientDeliveries: {}
+      };
+
+      inboundData?.forEach(row => {
+        const rota = row.rota as RotaName;
+        if (!newLog.rotaInbound[rota]) newLog.rotaInbound[rota] = {};
+        newLog.rotaInbound[rota]![row.product_name] = row.quantity;
+      });
+
+      deliveriesData?.forEach(row => {
+        const rota = row.rota as RotaName;
+        if (!newLog.clientDeliveries[rota]) newLog.clientDeliveries[rota] = [];
+        newLog.clientDeliveries[rota]!.push({
+          id: row.id,
+          clientName: row.client_name,
+          timestamp: row.delivery_timestamp,
+          items: row.items,
+          rota: rota
+        });
+      });
+
+      setState(prev => ({
+        ...prev,
+        logs: { ...prev.logs, [date]: newLog },
+        isCloudSynced: true
+      }));
+    } catch (error) {
+      console.error("Error fetching from Supabase:", error);
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+    } finally {
+      setIsInitialLoad(false);
+    }
+  };
+
+  // Carregar dados toda vez que a data mudar
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    // Simulando um "Sync" com a nuvem toda vez que o estado muda
-    setState(prev => prev.isCloudSynced ? prev : { ...prev, isCloudSynced: true });
-  }, [state]);
+    fetchData(state.currentDate);
+  }, [state.currentDate]);
 
   const currentLog = useMemo(() => {
-    if (state.logs[state.currentDate]) {
-      return state.logs[state.currentDate];
-    }
-    return {
+    return state.logs[state.currentDate] || {
       date: state.currentDate,
       rotaInbound: {},
       clientDeliveries: {}
     };
   }, [state.logs, state.currentDate]);
 
-  const updateLog = (newLog: DailyLog) => {
-    setState(prev => ({
-      ...prev,
-      isCloudSynced: false, // Inicia "syncing"
-      logs: { ...prev.logs, [prev.currentDate]: newLog }
+  const handleUpdateInbound = async (rota: RotaName, items: { [p: string]: number }) => {
+    setState(prev => ({ ...prev, isCloudSynced: false }));
+    
+    // Preparar dados para o formato da tabela do banco
+    const upserts = Object.entries(items).map(([p, q]) => ({
+      date: state.currentDate,
+      rota: rota,
+      product_name: p,
+      quantity: q
     }));
+
+    try {
+      const { error } = await supabase
+        .from('inbound')
+        .upsert(upserts, { onConflict: 'date,rota,product_name' });
+
+      if (error) throw error;
+      
+      // Atualiza localmente após sucesso no banco
+      const newLog = { ...currentLog };
+      newLog.rotaInbound = { ...newLog.rotaInbound, [rota]: items };
+      setState(prev => ({
+        ...prev,
+        logs: { ...prev.logs, [prev.currentDate]: newLog },
+        isCloudSynced: true
+      }));
+    } catch (e) {
+      console.error("Save error:", e);
+      alert("Erro ao salvar carga no banco de dados.");
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+    }
   };
 
-  const handleUpdateInbound = (rota: RotaName, items: { [p: string]: number }) => {
-    const newLog = { ...currentLog };
-    newLog.rotaInbound = { ...newLog.rotaInbound, [rota]: items };
-    updateLog(newLog);
+  const handleAddDelivery = async (rota: RotaName, delivery: ClientDelivery) => {
+    setState(prev => ({ ...prev, isCloudSynced: false }));
+    
+    try {
+      const { error } = await supabase
+        .from('deliveries')
+        .insert({
+          id: delivery.id,
+          date: state.currentDate,
+          rota: rota,
+          client_name: delivery.clientName,
+          items: delivery.items,
+          delivery_timestamp: delivery.timestamp
+        });
+
+      if (error) throw error;
+
+      const newLog = { ...currentLog };
+      const currentRels = newLog.clientDeliveries[rota] || [];
+      newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: [delivery, ...currentRels] };
+      
+      setState(prev => ({
+        ...prev,
+        logs: { ...prev.logs, [prev.currentDate]: newLog },
+        isCloudSynced: true
+      }));
+    } catch (e) {
+      console.error("Delivery error:", e);
+      alert("Erro ao registrar entrega no banco de dados.");
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+    }
   };
 
-  const handleAddDelivery = (rota: RotaName, delivery: ClientDelivery) => {
-    const newLog = { ...currentLog };
-    const currentRels = newLog.clientDeliveries[rota] || [];
-    newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: [delivery, ...currentRels] };
-    updateLog(newLog);
-  };
-
-  const handleDeleteDelivery = (rota: RotaName, deliveryId: string) => {
+  const handleDeleteDelivery = async (rota: RotaName, deliveryId: string) => {
     if (!window.confirm("Excluir registro permanentemente do banco?")) return;
-    const newLog = { ...currentLog };
-    const currentRels = newLog.clientDeliveries[rota] || [];
-    newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: currentRels.filter(d => d.id !== deliveryId) };
-    updateLog(newLog);
+    setState(prev => ({ ...prev, isCloudSynced: false }));
+    
+    try {
+      const { error } = await supabase
+        .from('deliveries')
+        .delete()
+        .eq('id', deliveryId);
+
+      if (error) throw error;
+
+      const newLog = { ...currentLog };
+      const currentRels = newLog.clientDeliveries[rota] || [];
+      newLog.clientDeliveries = { ...newLog.clientDeliveries, [rota]: currentRels.filter(d => d.id !== deliveryId) };
+      
+      setState(prev => ({
+        ...prev,
+        logs: { ...prev.logs, [prev.currentDate]: newLog },
+        isCloudSynced: true
+      }));
+    } catch (e) {
+      console.error("Delete error:", e);
+      setState(prev => ({ ...prev, isCloudSynced: true }));
+    }
   };
 
   const handleAiAnalysis = async () => {
@@ -89,7 +199,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Métricas Consolidadas Automáticas (Substitui a consolidação manual)
   const globalMetrics = useMemo(() => {
     let totalCarga = 0;
     let totalEntregue = 0;
@@ -121,7 +230,7 @@ const App: React.FC = () => {
               <span className="text-base font-black text-[#3D231A]">ValorCafé</span>
               <div className="flex items-center gap-2">
                 <span className="text-[8px] font-bold text-[#F9A11B] uppercase tracking-widest">Live Cloud Ops</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${state.isCloudSynced ? 'bg-green-500 animate-pulse' : 'bg-amber-500'}`}></span>
+                <span className={`w-1.5 h-1.5 rounded-full ${state.isCloudSynced ? 'bg-green-500 animate-pulse' : 'bg-amber-500 animate-spin-slow'}`}></span>
               </div>
             </div>
           </div>
@@ -149,84 +258,92 @@ const App: React.FC = () => {
 
       <main className="flex-1 max-w-6xl mx-auto w-full px-4 md:px-10 py-8">
         
-        {/* Dashboard de Monitoramento Global (Sempre visível, substituindo o upload) */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm col-span-1 md:col-span-1">
-              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Carga Total Saída</span>
-              <div className="flex items-end gap-2">
-                <span className="text-3xl font-black text-[#3D231A]">{globalMetrics.totalCarga}</span>
-                <span className="text-[10px] font-bold text-slate-400 mb-1.5 uppercase">Itens</span>
-              </div>
+        {isInitialLoad ? (
+           <div className="flex flex-col items-center justify-center py-20">
+              <div className="w-10 h-10 border-4 border-slate-200 border-t-[#F9A11B] rounded-full animate-spin mb-4"></div>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Sincronizando com Banco...</span>
            </div>
-           <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm col-span-1 md:col-span-1">
-              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Efetividade Entregas</span>
-              <div className="flex items-end gap-2">
-                <span className="text-3xl font-black text-[#F9A11B]">{globalMetrics.totalEntregue}</span>
-                <span className="text-[10px] font-bold text-amber-400 mb-1.5 uppercase">Realizadas</span>
-              </div>
-           </div>
-           <div className="bg-[#3D231A] p-6 rounded-3xl shadow-xl col-span-1 md:col-span-2 text-white relative overflow-hidden">
-              <div className="relative z-10 flex justify-between items-start">
-                <div>
-                  <span className="text-[9px] font-black text-white/50 uppercase tracking-widest block mb-2">IA Insight Logístico</span>
-                  <p className="text-xs font-medium leading-relaxed max-w-[80%] line-clamp-2">
-                    {aiInsight || "Consolidação automática ativa. Clique em analisar para insights estratégicos."}
-                  </p>
-                </div>
-                <button 
-                  onClick={handleAiAnalysis}
-                  disabled={isInsightLoading}
-                  className="bg-white/10 hover:bg-white/20 p-2.5 rounded-xl transition-colors"
-                >
-                  {isInsightLoading ? <i className="fas fa-sync fa-spin"></i> : <i className="fas fa-bolt text-[#F9A11B]"></i>}
-                </button>
-              </div>
-              <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-[#F9A11B] opacity-10 rounded-full blur-2xl"></div>
-           </div>
-        </div>
-
-        {/* Region Selector - Estilo Moderno */}
-        <div className="mb-6">
-          <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4 ml-1">Monitoramento por Região</h4>
-          <div className="flex flex-wrap gap-2">
-            {ROTAS.map(rota => {
-              const hasData = (currentLog.rotaInbound[rota] && Object.values(currentLog.rotaInbound[rota]!).some(v => (v as number) > 0));
-              return (
-                <button
-                  key={rota}
-                  onClick={() => setActiveRota(rota)}
-                  className={`relative px-6 py-4 rounded-2xl text-[11px] font-black tracking-widest transition-all border ${
-                    activeRota === rota 
-                      ? 'bg-[#3D231A] text-white border-[#3D231A] shadow-xl shadow-[#3D231A]/20 -translate-y-1' 
-                      : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
-                  }`}
-                >
-                  {rota.toUpperCase()}
-                  {hasData && activeRota !== rota && (
-                    <span className="absolute top-2 right-2 w-2 h-2 bg-green-500 rounded-full border-2 border-white"></span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {activeRota ? (
-          <RotaView
-            rota={activeRota}
-            log={currentLog}
-            onUpdateInbound={handleUpdateInbound}
-            onAddDelivery={handleAddDelivery}
-            onDeleteDelivery={handleDeleteDelivery}
-          />
         ) : (
-          <div className="bg-white border border-slate-200 rounded-[2.5rem] p-20 text-center shadow-sm">
-            <div className="w-24 h-24 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-8">
-              <i className="fas fa-map-location-dot text-3xl text-slate-200"></i>
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+               <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm col-span-1 md:col-span-1">
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Carga Total Saída</span>
+                  <div className="flex items-end gap-2">
+                    <span className="text-3xl font-black text-[#3D231A]">{globalMetrics.totalCarga}</span>
+                    <span className="text-[10px] font-bold text-slate-400 mb-1.5 uppercase">Itens</span>
+                  </div>
+               </div>
+               <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm col-span-1 md:col-span-1">
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Efetividade Entregas</span>
+                  <div className="flex items-end gap-2">
+                    <span className="text-3xl font-black text-[#F9A11B]">{globalMetrics.totalEntregue}</span>
+                    <span className="text-[10px] font-bold text-amber-400 mb-1.5 uppercase">Realizadas</span>
+                  </div>
+               </div>
+               <div className="bg-[#3D231A] p-6 rounded-3xl shadow-xl col-span-1 md:col-span-2 text-white relative overflow-hidden">
+                  <div className="relative z-10 flex justify-between items-start">
+                    <div>
+                      <span className="text-[9px] font-black text-white/50 uppercase tracking-widest block mb-2">IA Insight Logístico</span>
+                      <p className="text-xs font-medium leading-relaxed max-w-[80%] line-clamp-2">
+                        {aiInsight || "Consolidação automática ativa. Clique em analisar para insights estratégicos."}
+                      </p>
+                    </div>
+                    <button 
+                      onClick={handleAiAnalysis}
+                      disabled={isInsightLoading}
+                      className="bg-white/10 hover:bg-white/20 p-2.5 rounded-xl transition-colors"
+                    >
+                      {isInsightLoading ? <i className="fas fa-sync fa-spin"></i> : <i className="fas fa-bolt text-[#F9A11B]"></i>}
+                    </button>
+                  </div>
+                  <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-[#F9A11B] opacity-10 rounded-full blur-2xl"></div>
+               </div>
             </div>
-            <h3 className="text-[#3D231A] font-black text-xl mb-2">Visão Geral Ativa</h3>
-            <p className="text-slate-400 text-sm max-w-sm mx-auto">Selecione uma região acima para gerenciar o carregamento ou registrar entregas em tempo real.</p>
-          </div>
+
+            <div className="mb-6">
+              <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4 ml-1">Monitoramento por Região</h4>
+              <div className="flex flex-wrap gap-2">
+                {ROTAS.map(rota => {
+                  const hasInbound = (currentLog.rotaInbound[rota] && Object.values(currentLog.rotaInbound[rota]!).some(v => (v as number) > 0));
+                  const hasDeliveries = (currentLog.clientDeliveries[rota] && currentLog.clientDeliveries[rota]!.length > 0);
+                  return (
+                    <button
+                      key={rota}
+                      onClick={() => setActiveRota(rota)}
+                      className={`relative px-6 py-4 rounded-2xl text-[11px] font-black tracking-widest transition-all border ${
+                        activeRota === rota 
+                          ? 'bg-[#3D231A] text-white border-[#3D231A] shadow-xl shadow-[#3D231A]/20 -translate-y-1' 
+                          : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
+                      }`}
+                    >
+                      {rota.toUpperCase()}
+                      {(hasInbound || hasDeliveries) && activeRota !== rota && (
+                        <span className="absolute top-2 right-2 w-2 h-2 bg-green-500 rounded-full border-2 border-white"></span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {activeRota ? (
+              <RotaView
+                rota={activeRota}
+                log={currentLog}
+                onUpdateInbound={handleUpdateInbound}
+                onAddDelivery={handleAddDelivery}
+                onDeleteDelivery={handleDeleteDelivery}
+              />
+            ) : (
+              <div className="bg-white border border-slate-200 rounded-[2.5rem] p-20 text-center shadow-sm">
+                <div className="w-24 h-24 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-8">
+                  <i className="fas fa-map-location-dot text-3xl text-slate-200"></i>
+                </div>
+                <h3 className="text-[#3D231A] font-black text-xl mb-2">Visão Geral Ativa</h3>
+                <p className="text-slate-400 text-sm max-w-sm mx-auto">Selecione uma região acima para gerenciar o carregamento ou registrar entregas em tempo real sincronizadas na nuvem.</p>
+              </div>
+            )}
+          </>
         )}
       </main>
 
